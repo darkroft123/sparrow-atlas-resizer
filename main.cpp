@@ -191,6 +191,11 @@ int main() {
 	Rectangle dragFrameStart = {};
 	int dragHandle = -1;
 
+	char frameXText[32] = "";
+	char frameYText[32] = "";
+	bool frameXEdit = false;
+	bool frameYEdit = false;
+
 	while (!WindowShouldClose())
 	{
 		constexpr float maxScale = 2.0f;
@@ -405,11 +410,59 @@ int main() {
 			dragMode = DRAG_NONE;
 		}
 
+		if (GuiButton(Rectangle{.x = 1000, .y = 260, .width = 250, .height = 25}, "RESET FRAMES")) {
+			for (size_t i = 0; i < frameRects.size() && i < originalFrameRects.size(); ++i) {
+				frameRects[i] = originalFrameRects[i];
+			}
+		}
+
+		if (GuiButton(Rectangle{.x = 1000, .y = 295, .width = 250, .height = 25}, "RESET CONTAINER")) {
+			container = Rectangle{.x = 0, .y = 0, .width = imageDimensions.width, .height = imageDimensions.height};
+		}
+
 		if (editMode) {
-			GuiLabel(Rectangle{.x = 1000, .y = 255, .width = 250, .height = 20}, "Click+drag: move frames/container");
-			GuiLabel(Rectangle{.x = 1000, .y = 275, .width = 250, .height = 20}, "Drag green handles: crop container");
-			if (selectedFrame >= 0 && selectedFrame < static_cast<int>(frameNames.size())) {
-				DrawText(TextFormat("Selected: %s", frameNames[selectedFrame].c_str()), 1000, 300, 18, DARKGRAY);
+			GuiLabel(Rectangle{.x = 1000, .y = 335, .width = 250, .height = 20}, "Click+drag: move frames/container");
+			GuiLabel(Rectangle{.x = 1000, .y = 355, .width = 250, .height = 20}, "Drag green handles: crop container");
+		}
+
+		if (selectedFrame >= 0 && selectedFrame < static_cast<int>(frameNames.size())) {
+			const auto &f = frameRects[selectedFrame];
+			const auto &of = originalFrameRects[selectedFrame];
+			const float panelY = static_cast<float>(GetRenderHeight()) - 120.0f;
+
+			DrawRectangle(0, static_cast<int>(panelY), 400, 120, ColorAlpha(LIGHTGRAY, 0.85));
+			DrawRectangleLines(0, static_cast<int>(panelY), 400, 120, DARKGRAY);
+
+			DrawText(TextFormat("Frame: %s", frameNames[selectedFrame].c_str()), 10, static_cast<int>(panelY + 8), 16, BLACK);
+			DrawText(TextFormat("Original: X:%.0f Y:%.0f W:%.0f H:%.0f", of.x, of.y, of.width, of.height), 10, static_cast<int>(panelY + 28), 14, DARKGRAY);
+
+			DrawText("X:", 10, static_cast<int>(panelY + 52), 14, BLACK);
+			GuiValueBoxFloat(Rectangle{.x = 30, .y = panelY + 48, .width = 80, .height = 20}, NULL, frameXText, &frameRects[selectedFrame].x, frameXEdit);
+			DrawText("Y:", 120, static_cast<int>(panelY + 52), 14, BLACK);
+			GuiValueBoxFloat(Rectangle{.x = 140, .y = panelY + 48, .width = 80, .height = 20}, NULL, frameYText, &frameRects[selectedFrame].y, frameYEdit);
+
+			DrawText(TextFormat("W:%.0f  H:%.0f", f.width, f.height), 240, static_cast<int>(panelY + 52), 14, BLACK);
+			DrawText(TextFormat("Current: X:%.0f Y:%.0f", f.x, f.y), 10, static_cast<int>(panelY + 78), 14, BLACK);
+
+			if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+				if (CheckCollisionPointRec(GetMousePosition(), Rectangle{.x = 30, .y = panelY + 48, .width = 80, .height = 20})) {
+					frameXEdit = !frameXEdit;
+					frameYEdit = false;
+				}
+				else if (CheckCollisionPointRec(GetMousePosition(), Rectangle{.x = 140, .y = panelY + 48, .width = 80, .height = 20})) {
+					frameYEdit = !frameYEdit;
+					frameXEdit = false;
+				}
+				else {
+					frameXEdit = false;
+					frameYEdit = false;
+				}
+			}
+			if (!frameXEdit) {
+				snprintf(frameXText, sizeof(frameXText), "%.1f", frameRects[selectedFrame].x);
+			}
+			if (!frameYEdit) {
+				snprintf(frameYText, sizeof(frameYText), "%.1f", frameRects[selectedFrame].y);
 			}
 		}
 
