@@ -6,6 +6,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <cfloat>
 
 #include "pugixml.hpp"
 #include "raylib.h"
@@ -246,10 +247,44 @@ void detectAnimGroups(const std::vector<std::string> &frameNames, std::vector<An
 	groups.insert(groups.begin(), allGroup);
 }
 
+struct GroupCanvasInfo {
+	float frameWidth;
+	float frameHeight;
+	std::vector<std::pair<float, float>> frameOffsets;
+};
+
+GroupCanvasInfo computeGroupCanvas(const std::vector<Rectangle> &frameRects,
+                                    const std::vector<FrameData> &originalFrameData,
+                                    const std::vector<int> &frameIndices) {
+	float minFX = FLT_MAX, minFY = FLT_MAX;
+	float maxRight = -FLT_MAX, maxBottom = -FLT_MAX;
+	for (int fi : frameIndices) {
+		if (fi < 0 || fi >= static_cast<int>(frameRects.size()) || fi >= static_cast<int>(originalFrameData.size())) continue;
+		float fx = originalFrameData[fi].frameX;
+		float fy = originalFrameData[fi].frameY;
+		float rw = frameRects[fi].width;
+		float rh = frameRects[fi].height;
+		minFX = std::min(minFX, fx);
+		minFY = std::min(minFY, fy);
+		maxRight = std::max(maxRight, fx + rw);
+		maxBottom = std::max(maxBottom, fy + rh);
+	}
+	GroupCanvasInfo info;
+	info.frameWidth = maxRight - minFX;
+	info.frameHeight = maxBottom - minFY;
+	for (int fi : frameIndices) {
+		float fx = (fi < static_cast<int>(originalFrameData.size())) ? originalFrameData[fi].frameX : 0.0f;
+		float fy = (fi < static_cast<int>(originalFrameData.size())) ? originalFrameData[fi].frameY : 0.0f;
+		info.frameOffsets.push_back({fx - minFX, fy - minFY});
+	}
+	return info;
+}
+
 void saveOutput(const Texture &spritesheet, const pugi::xml_document &doc, const std::string &pngPath,
                 const std::string &xmlPath, float scale, const Rectangle &container,
                 const std::vector<Rectangle> &frameRects, const std::vector<Rectangle> &originalFrameRects,
-                const std::vector<FrameData> &originalFrameData, const std::vector<std::string> &frameNames) {
+                const std::vector<FrameData> &originalFrameData, const std::vector<std::string> &frameNames,
+                const std::vector<AnimGroup> &animGroups) {
 	const int outW = static_cast<int>(std::round(container.width * scale));
 	const int outH = static_cast<int>(std::round(container.height * scale));
 	if (outW <= 0 || outH <= 0) return;
@@ -276,37 +311,45 @@ void saveOutput(const Texture &spritesheet, const pugi::xml_document &doc, const
 
 	pugi::xml_document outDoc;
 	pugi::xml_node outAtlas = outDoc.append_child("TextureAtlas");
-	for (auto attr : doc.child("TextureAtlas").attributes()) {
-		outAtlas.append_attribute(attr.name()).set_value(attr.value());
-	}
-	for (auto child : doc.child("TextureAtlas").children()) {
-		outAtlas.append_copy(child);
-	}
+	outAtlas.append_attribute("imagePath").set_value(pngPath.c_str());
+	outAtlas.append_attribute("width").set_value(outW);
+	outAtlas.append_attribute("height").set_value(outH);
 
-	outDoc.child("TextureAtlas").attribute("width").set_value(outW);
-	outDoc.child("TextureAtlas").attribute("height").set_value(outH);
-
-	auto frameIt = outDoc.child("TextureAtlas").children("SubTexture").begin();
-	for (size_t i = 0; i < frameRects.size() && frameIt != outDoc.child("TextureAtlas").children("SubTexture").end(); ++i, ++frameIt) {
+	for (size_t i = 0; i < frameRects.size(); ++i) {
+		pugi::xml_node sub = outAtlas.append_child("SubTexture");
+		if (i < frameNames.size()) {
+			sub.append_attribute("name").set_value(frameNames[i].c_str());
+		}
 		const float newX = (frameRects[i].x - container.x) * scale;
 		const float newY = (frameRects[i].y - container.y) * scale;
 		const float newW = frameRects[i].width * scale;
 		const float newH = frameRects[i].height * scale;
+		sub.append_attribute("x").set_value(newX);
+		sub.append_attribute("y").set_value(newY);
+		sub.append_attribute("width").set_value(newW);
+		sub.append_attribute("height").set_value(newH);
 
-		frameIt->attribute("x").set_value(newX);
-		frameIt->attribute("y").set_value(newY);
-		frameIt->attribute("width").set_value(newW);
-		frameIt->attribute("height").set_value(newH);
-
-		if (i < originalFrameData.size() && frameIt->attribute("frameX")) {
-			frameIt->attribute("frameX").set_value(originalFrameData[i].frameX * scale);
-			frameIt->attribute("frameY").set_value(originalFrameData[i].frameY * scale);
-			frameIt->attribute("frameWidth").set_value(originalFrameData[i].frameWidth * scale);
-			frameIt->attribute("frameHeight").set_value(originalFrameData[i].frameHeight * scale);
+		bool foundGroup = false;
+		for (size_t g = 1; g < animGroups.size(); ++g) {
+			const auto &grp = animGroups[g];
+			for (size_t k = 0; k < grp.frameIndices.size(); ++k) {
+				if (grp.frameIndices[k] == static_cast<int>(i)) {
+					GroupCanvasInfo ci = computeGroupCanvas(frameRects, originalFrameData, grp.frameIndices);
+					sub.append_attribute("frameX").set_value(ci.frameOffsets[k].first * scale);
+					sub.append_attribute("frameY").set_value(ci.frameOffsets[k].second * scale);
+					sub.append_attribute("frameWidth").set_value(ci.frameWidth * scale);
+					sub.append_attribute("frameHeight").set_value(ci.frameHeight * scale);
+					foundGroup = true;
+					break;
+				}
+			}
+			if (foundGroup) break;
 		}
-
-		if (i < frameNames.size()) {
-			frameIt->attribute("name").set_value(frameNames[i].c_str());
+		if (!foundGroup && i < originalFrameData.size()) {
+			sub.append_attribute("frameX").set_value(originalFrameData[i].frameX * scale);
+			sub.append_attribute("frameY").set_value(originalFrameData[i].frameY * scale);
+			sub.append_attribute("frameWidth").set_value(originalFrameData[i].frameWidth * scale);
+			sub.append_attribute("frameHeight").set_value(originalFrameData[i].frameHeight * scale);
 		}
 	}
 
@@ -314,6 +357,7 @@ void saveOutput(const Texture &spritesheet, const pugi::xml_document &doc, const
 }
 
 enum DragMode { DRAG_NONE, DRAG_CONTAINER_BODY, DRAG_CONTAINER_HANDLE, DRAG_FRAME };
+enum AppState { STATE_MAIN, STATE_ANIM_EDITOR };
 
 int getContainerHandle(const Rectangle &container, Vector2 mouseImg, float threshold) {
 	const float x = container.x, y = container.y, w = container.width, h = container.height;
@@ -399,12 +443,118 @@ int main() {
 	std::vector<AnimGroup> animGroups;
 	int selectedAnim = 0;
 
+	AppState appState = STATE_MAIN;
+	float editorScrollY = 0.0f;
+	int editorSelectedFrame = -1;
+	int editorSelectedAnim = 0;
+	bool editorDragging = false;
+	Vector2 editorDragStart = {};
+	bool editorZoomed = false;
+	float editorPreviewZoom = 1.0f;
+	bool editorShowFrameBox = false;
+
+	bool darkMode = false;
+
+	struct Theme {
+		Color bg;
+		Color panelBg;
+		Color panelBgAlt;
+		Color headerBg;
+		Color text;
+		Color textDim;
+		Color textBright;
+		Color border;
+		Color inputBg;
+		Color inputBorder;
+		Color previewBg;
+		Color accent;
+		Color accentText;
+		Color selectedBg;
+	};
+
+	auto applyGuiTheme = [&]() {
+		if (darkMode) {
+			GuiSetStyle(DEFAULT, BACKGROUND_COLOR, 0x1e1e1eff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_NORMAL, 0x505050ff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_NORMAL, 0x373737ff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_NORMAL, 0xdcdcdcff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_FOCUSED, 0x64a0ffff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_FOCUSED, 0x464659ff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_FOCUSED, 0xdcdcdcff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_PRESSED, 0x64a0ffff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_PRESSED, 0x64a0ffff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_PRESSED, 0xffffffff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_DISABLED, 0x505050ff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_DISABLED, 0x323232ff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_DISABLED, 0x8c8c8cff);
+			GuiSetStyle(DEFAULT, LINE_COLOR, 0x505050ff);
+			GuiSetStyle(SLIDER, BASE_COLOR_NORMAL, 0x505050ff);
+		} else {
+			GuiSetStyle(DEFAULT, BACKGROUND_COLOR, 0xf5f5f5ff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_NORMAL, 0x838383ff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_NORMAL, 0xc9c9c9ff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_NORMAL, 0x686868ff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_FOCUSED, 0x5bb2d9ff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_FOCUSED, 0xc9effeff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_FOCUSED, 0x6c9bbcff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_PRESSED, 0x0492c7ff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_PRESSED, 0x97e8ffff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_PRESSED, 0x368bafff);
+			GuiSetStyle(DEFAULT, BORDER_COLOR_DISABLED, 0xb5c1c2ff);
+			GuiSetStyle(DEFAULT, BASE_COLOR_DISABLED, 0xe6e9e9ff);
+			GuiSetStyle(DEFAULT, TEXT_COLOR_DISABLED, 0xaeb7b8ff);
+			GuiSetStyle(DEFAULT, LINE_COLOR, 0x90abb5ff);
+			GuiSetStyle(SLIDER, BASE_COLOR_NORMAL, 0xc9c9c9ff);
+		}
+	};
+
+	auto getTheme = [&]() -> Theme {
+		if (darkMode) {
+			return Theme{
+				{30, 30, 30, 255},
+				{40, 40, 40, 255},
+				{50, 50, 50, 255},
+				{25, 25, 35, 230},
+				{220, 220, 220, 255},
+				{140, 140, 140, 255},
+				{255, 255, 255, 255},
+				{80, 80, 80, 255},
+				{55, 55, 55, 255},
+				{90, 90, 90, 255},
+				{35, 35, 40, 255},
+				{100, 160, 255, 255},
+				{255, 255, 255, 255},
+				{70, 70, 90, 200},
+			};
+		} else {
+			return Theme{
+				{230, 230, 230, 255},
+				{245, 245, 245, 255},
+				{255, 255, 255, 255},
+				{220, 220, 230, 230},
+				{30, 30, 30, 255},
+				{100, 100, 100, 255},
+				{0, 0, 0, 255},
+				{180, 180, 180, 255},
+				{255, 255, 255, 255},
+				{160, 160, 160, 255},
+				{200, 200, 200, 255},
+				{50, 100, 200, 255},
+				{255, 255, 255, 255},
+				{200, 210, 240, 200},
+			};
+		}
+	};
+
+	applyGuiTheme();
+
 	while (!WindowShouldClose())
 	{
 		constexpr float maxScale = 2.0f;
 		constexpr float minScale = 0.1f;
 		BeginDrawing();
-		ClearBackground(RAYWHITE);
+		Theme th = getTheme();
+		ClearBackground(th.bg);
 
 		if (IsFileDropped()) {
 			const FilePathList droppedFiles = LoadDroppedFiles();
@@ -423,6 +573,8 @@ int main() {
 			}
 			UnloadDroppedFiles(droppedFiles);
 		}
+
+		if (appState == STATE_MAIN) {
 
 		bool guiHovered = CheckCollisionPointRec(GetMousePosition(), Rectangle{.x = 980, .y = 0, .width = 300, .height = 720});
 		bool anyTextEdit = frameNameEdit || frameXEdit || frameYEdit || frameWEdit || frameHEdit ||
@@ -527,7 +679,7 @@ int main() {
 		if (spritesheet.width <= 0) {
 			const auto message = "Drag an image to begin.";
 			auto [x, y] = MeasureTextEx(GetFontDefault(), message, 32, 1);
-			DrawText(message, static_cast<int>(static_cast<float>(GetRenderWidth()) - x) / 2, static_cast<int>(static_cast<float>(GetRenderHeight()) - y) / 2, 32, BLACK);
+			DrawText(message, static_cast<int>(static_cast<float>(GetRenderWidth()) - x) / 2, static_cast<int>(static_cast<float>(GetRenderHeight()) - y) / 2, 32, th.text);
 		}
 		else {
 		BeginMode2D(camSpritesheet);
@@ -544,9 +696,9 @@ int main() {
 			for (size_t i = 0; i < frameRects.size(); ++i) {
 				const auto &rect = frameRects[i];
 				if (static_cast<int>(i) == selectedFrame) {
-					DrawRectangleLinesEx(rect, 4, YELLOW);
-					if (!frameNames[i].empty()) {
-						DrawText(frameNames[i].c_str(), static_cast<int>(rect.x), static_cast<int>(rect.y - 16), 14, DARKGRAY);
+				DrawRectangleLinesEx(rect, 4, th.accent);
+				if (!frameNames[i].empty()) {
+					DrawText(frameNames[i].c_str(), static_cast<int>(rect.x), static_cast<int>(rect.y - 16), 14, th.textDim);
 					}
 				}
 				else {
@@ -572,16 +724,16 @@ int main() {
 					{.x = sx + sw / 2 - hsh, .y = sy - hsh, .width = hs, .height = hs},
 					{.x = sx + sw / 2 - hsh, .y = sy + sh - hsh, .width = hs, .height = hs},
 				};
-				for (const auto &h : handles) {
-					DrawRectangleRec(h, GREEN);
-					DrawRectangleLinesEx(h, 2, DARKGREEN);
+			for (const auto &h : handles) {
+				DrawRectangleRec(h, GREEN);
+				DrawRectangleLinesEx(h, 2, th.accent);
 				}
 			}
 		EndMode2D();
 
 		}
 
-		DrawText(TextFormat("Scale: %.03lf", scale), 1000, 12, 32, BLACK);
+		DrawText(TextFormat("Scale: %.03lf", scale), 1000, 12, 32, th.text);
 		GuiSlider(Rectangle{.x = 1000, .y = 50, .width = 250, .height = 25}, TextFormat("%0.1lf", minScale), TextFormat("%0.1lf", maxScale), &scale, minScale, maxScale);
 		GuiValueBoxFloat(Rectangle{.x = 1260, .y = 50, .width = 60, .height = 25}, NULL, scaleText, &scale, scaleEditMode);
 		if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
@@ -599,10 +751,10 @@ int main() {
 		if (spritesheet.width > 0) {
 			const int outW = static_cast<int>(std::round(container.width * scale));
 			const int outH = static_cast<int>(std::round(container.height * scale));
-			DrawText(TextFormat("Output: %d x %d", outW, outH), 1000, 80, 14, DARKGRAY);
+			DrawText(TextFormat("Output: %d x %d", outW, outH), 1000, 80, 14, th.textDim);
 		}
 
-		DrawText(TextFormat("Camera Zoom: %.01lf (mouse wheel) | WASD/Arrows: pan", camSpritesheet.zoom), 820, 690, 20, BLACK);
+		DrawText(TextFormat("Camera Zoom: %.01lf (mouse wheel) | WASD/Arrows: pan", camSpritesheet.zoom), 300, 690, 20, th.text);
 
 		if (GuiButton(Rectangle{.x = 1000, .y = 100, .width = 250, .height = 25}, "SAVE")) {
 			if (!currentPngPath.empty()) {
@@ -610,7 +762,7 @@ int main() {
 				outPng.replace(outPng.length() - 4, 4, "_out.png");
 				std::string outXml = currentPngPath;
 				outXml.replace(outXml.length() - 4, 4, "_out.xml");
-				saveOutput(spritesheet, doc, outPng, outXml, scale, container, frameRects, originalFrameRects, originalFrameData, frameNames);
+				saveOutput(spritesheet, doc, outPng, outXml, scale, container, frameRects, originalFrameRects, originalFrameData, frameNames, animGroups);
 			}
 		}
 
@@ -634,7 +786,7 @@ int main() {
 			if (!pngPath.empty()) {
 				std::string xmlPath = pngPath;
 				xmlPath.replace(xmlPath.length() - 3, 3, "xml");
-				saveOutput(spritesheet, doc, pngPath, xmlPath, scale, container, frameRects, originalFrameRects, originalFrameData, frameNames);
+				saveOutput(spritesheet, doc, pngPath, xmlPath, scale, container, frameRects, originalFrameRects, originalFrameData, frameNames, animGroups);
 			}
 		}
 
@@ -672,23 +824,40 @@ int main() {
 			container = Rectangle{.x = 0, .y = 0, .width = imageDimensions.width, .height = imageDimensions.height};
 		}
 
+		if (!frameRects.empty() && hasXml) {
+			if (GuiButton(Rectangle{.x = 1000, .y = 360, .width = 250, .height = 25}, "ANIM EDITOR")) {
+				appState = STATE_ANIM_EDITOR;
+				if (!animGroups.empty()) {
+					detectAnimGroups(frameNames, animGroups);
+				}
+				editorSelectedFrame = frameRects.empty() ? -1 : 0;
+				editorScrollY = 0;
+			}
+		}
+
+		const char *themeLabel = darkMode ? "LIGHT MODE" : "DARK MODE";
+		if (GuiButton(Rectangle{.x = 1000, .y = 680, .width = 250, .height = 25}, themeLabel)) {
+			darkMode = !darkMode;
+			applyGuiTheme();
+		}
+
 		if (editMode) {
-			GuiLabel(Rectangle{.x = 1000, .y = 365, .width = 250, .height = 20}, "Click+drag: move frames/container");
-			GuiLabel(Rectangle{.x = 1000, .y = 385, .width = 250, .height = 20}, "Drag green handles: crop container");
+			GuiLabel(Rectangle{.x = 1000, .y = 395, .width = 250, .height = 20}, "Click+drag: move frames/container");
+			GuiLabel(Rectangle{.x = 1000, .y = 415, .width = 250, .height = 20}, "Drag green handles: crop container");
 		}
 
 		if (!editMode && spritesheet.width > 0 && !frameRects.empty() && !animGroups.empty()) {
 			const float pvX = 1000.0f;
-			const float pvY = 365.0f;
+			const float pvY = 395.0f;
 			const float pvW = 250.0f;
 			const float pvH = 200.0f;
 
 			const auto &groupFrames = animGroups[selectedAnim].frameIndices;
 			const int groupCount = static_cast<int>(groupFrames.size());
 
-			DrawRectangle(static_cast<int>(pvX), static_cast<int>(pvY), static_cast<int>(pvW), static_cast<int>(pvH), ColorAlpha(DARKGRAY, 0.9f));
-			DrawRectangleLinesEx(Rectangle{pvX, pvY, pvW, pvH}, 2, BLACK);
-			DrawText("ANIMATION PREVIEW", static_cast<int>(pvX + 5), static_cast<int>(pvY + 5), 14, WHITE);
+			DrawRectangle(static_cast<int>(pvX), static_cast<int>(pvY), static_cast<int>(pvW), static_cast<int>(pvH), th.previewBg);
+			DrawRectangleLinesEx(Rectangle{pvX, pvY, pvW, pvH}, 2, th.border);
+			DrawText("ANIMATION PREVIEW", static_cast<int>(pvX + 5), static_cast<int>(pvY + 5), 14, th.textBright);
 
 			if (animPlaying && groupCount > 0) {
 				animTimer += GetFrameTime();
@@ -715,7 +884,7 @@ int main() {
 				DrawTexturePro(spritesheet, src, dstRect, Vector2Zero(), 0.0f, WHITE);
 
 				if (globalIdx < static_cast<int>(frameNames.size())) {
-					DrawText(frameNames[globalIdx].c_str(), static_cast<int>(pvX + 5), static_cast<int>(pvY + pvH - 18), 12, LIGHTGRAY);
+					DrawText(frameNames[globalIdx].c_str(), static_cast<int>(pvX + 5), static_cast<int>(pvY + pvH - 18), 12, th.textDim);
 				}
 			}
 
@@ -726,8 +895,8 @@ int main() {
 				animFrame = 0;
 				animTimer = 0;
 			}
-			DrawText(animGroups[selectedAnim].name.c_str(), static_cast<int>(pvX + 35), static_cast<int>(grpY + 4), 14, BLACK);
-			DrawText(TextFormat("(%d frames)", groupCount), static_cast<int>(pvX + 35 + MeasureText(animGroups[selectedAnim].name.c_str(), 14) + 10), static_cast<int>(grpY + 4), 12, DARKGRAY);
+			DrawText(animGroups[selectedAnim].name.c_str(), static_cast<int>(pvX + 35), static_cast<int>(grpY + 4), 14, th.text);
+			DrawText(TextFormat("(%d frames)", groupCount), static_cast<int>(pvX + 35 + MeasureText(animGroups[selectedAnim].name.c_str(), 14) + 10), static_cast<int>(grpY + 4), 12, th.textDim);
 			if (GuiButton(Rectangle{pvX + pvW - 30, grpY, 30, 22}, ">")) {
 				selectedAnim = (selectedAnim + 1) % static_cast<int>(animGroups.size());
 				animFrame = 0;
@@ -751,11 +920,11 @@ int main() {
 				animTimer = 0;
 			}
 
-			DrawText(TextFormat("%d / %d", animFrame + 1, groupCount),
-			         static_cast<int>(pvX + 140), static_cast<int>(ctrlY + 3), 14, BLACK);
+		DrawText(TextFormat("%d / %d", animFrame + 1, groupCount),
+		         static_cast<int>(pvX + 140), static_cast<int>(ctrlY + 3), 14, th.text);
 
-			float spdY = ctrlY + 28.0f;
-			DrawText("FPS:", static_cast<int>(pvX), static_cast<int>(spdY + 3), 14, BLACK);
+		float spdY = ctrlY + 28.0f;
+		DrawText("FPS:", static_cast<int>(pvX), static_cast<int>(spdY + 3), 14, th.text);
 			GuiSlider(Rectangle{pvX + 35, spdY, 215, 20}, "1", "30", &animSpeed, 1.0f, 30.0f);
 		}
 
@@ -779,39 +948,39 @@ int main() {
 			const auto &od = originalFrameData[selectedFrame];
 			const float panelY = static_cast<float>(GetRenderHeight()) - 180.0f;
 
-			DrawRectangle(0, static_cast<int>(panelY), 600, 180, ColorAlpha(LIGHTGRAY, 0.85));
-			DrawRectangleLines(0, static_cast<int>(panelY), 600, 180, DARKGRAY);
+		DrawRectangle(0, static_cast<int>(panelY), 600, 180, th.panelBg);
+		DrawRectangleLines(0, static_cast<int>(panelY), 600, 180, th.border);
 
-			DrawText("Name:", 10, static_cast<int>(panelY + 6), 14, BLACK);
+		DrawText("Name:", 10, static_cast<int>(panelY + 6), 14, th.text);
 			GuiTextBox(Rectangle{.x = 60, .y = panelY + 2, .width = 200, .height = 20}, frameNameText, sizeof(frameNameText), frameNameEdit);
 			if (frameNameEdit) {
 				frameNames[selectedFrame] = frameNameText;
 			}
 
-			DrawText(TextFormat("Orig: X:%.0f Y:%.0f W:%.0f H:%.0f", of.x, of.y, of.width, of.height), 10, static_cast<int>(panelY + 26), 12, DARKGRAY);
+		DrawText(TextFormat("Orig: X:%.0f Y:%.0f W:%.0f H:%.0f", of.x, of.y, of.width, of.height), 10, static_cast<int>(panelY + 26), 12, th.textDim);
 
-			const float r1 = panelY + 42.0f;
-			DrawText("X:", 10, static_cast<int>(r1 + 4), 14, BLACK);
-			GuiValueBoxFloat(Rectangle{.x = 28, .y = r1, .width = 65, .height = 20}, NULL, frameXText, &frameRects[selectedFrame].x, frameXEdit);
-			DrawText("Y:", 100, static_cast<int>(r1 + 4), 14, BLACK);
-			GuiValueBoxFloat(Rectangle{.x = 118, .y = r1, .width = 65, .height = 20}, NULL, frameYText, &frameRects[selectedFrame].y, frameYEdit);
-			DrawText("W:", 195, static_cast<int>(r1 + 4), 14, BLACK);
-			GuiValueBoxFloat(Rectangle{.x = 213, .y = r1, .width = 65, .height = 20}, NULL, frameWText, &frameRects[selectedFrame].width, frameWEdit);
-			DrawText("H:", 290, static_cast<int>(r1 + 4), 14, BLACK);
-			GuiValueBoxFloat(Rectangle{.x = 308, .y = r1, .width = 65, .height = 20}, NULL, frameHText, &frameRects[selectedFrame].height, frameHEdit);
+		const float r1 = panelY + 42.0f;
+		DrawText("X:", 10, static_cast<int>(r1 + 4), 14, th.text);
+		GuiValueBoxFloat(Rectangle{.x = 28, .y = r1, .width = 65, .height = 20}, NULL, frameXText, &frameRects[selectedFrame].x, frameXEdit);
+		DrawText("Y:", 100, static_cast<int>(r1 + 4), 14, th.text);
+		GuiValueBoxFloat(Rectangle{.x = 118, .y = r1, .width = 65, .height = 20}, NULL, frameYText, &frameRects[selectedFrame].y, frameYEdit);
+		DrawText("W:", 195, static_cast<int>(r1 + 4), 14, th.text);
+		GuiValueBoxFloat(Rectangle{.x = 213, .y = r1, .width = 65, .height = 20}, NULL, frameWText, &frameRects[selectedFrame].width, frameWEdit);
+		DrawText("H:", 290, static_cast<int>(r1 + 4), 14, th.text);
+		GuiValueBoxFloat(Rectangle{.x = 308, .y = r1, .width = 65, .height = 20}, NULL, frameHText, &frameRects[selectedFrame].height, frameHEdit);
 
-			const float r2 = panelY + 66.0f;
-			DrawText("fX:", 10, static_cast<int>(r2 + 4), 14, DARKGREEN);
-			GuiValueBoxFloat(Rectangle{.x = 32, .y = r2, .width = 65, .height = 20}, NULL, frameFXText, &originalFrameData[selectedFrame].frameX, frameFXEdit);
-			DrawText("fY:", 100, static_cast<int>(r2 + 4), 14, DARKGREEN);
-			GuiValueBoxFloat(Rectangle{.x = 122, .y = r2, .width = 65, .height = 20}, NULL, frameFYText, &originalFrameData[selectedFrame].frameY, frameFYEdit);
-			DrawText("fW:", 195, static_cast<int>(r2 + 4), 14, DARKGREEN);
-			GuiValueBoxFloat(Rectangle{.x = 220, .y = r2, .width = 65, .height = 20}, NULL, frameFWText, &originalFrameData[selectedFrame].frameWidth, frameFWEdit);
-			DrawText("fH:", 290, static_cast<int>(r2 + 4), 14, DARKGREEN);
-			GuiValueBoxFloat(Rectangle{.x = 315, .y = r2, .width = 65, .height = 20}, NULL, frameFHText, &originalFrameData[selectedFrame].frameHeight, frameFHEdit);
+		const float r2 = panelY + 66.0f;
+		DrawText("fX:", 10, static_cast<int>(r2 + 4), 14, th.accent);
+		GuiValueBoxFloat(Rectangle{.x = 32, .y = r2, .width = 65, .height = 20}, NULL, frameFXText, &originalFrameData[selectedFrame].frameX, frameFXEdit);
+		DrawText("fY:", 100, static_cast<int>(r2 + 4), 14, th.accent);
+		GuiValueBoxFloat(Rectangle{.x = 122, .y = r2, .width = 65, .height = 20}, NULL, frameFYText, &originalFrameData[selectedFrame].frameY, frameFYEdit);
+		DrawText("fW:", 195, static_cast<int>(r2 + 4), 14, th.accent);
+		GuiValueBoxFloat(Rectangle{.x = 220, .y = r2, .width = 65, .height = 20}, NULL, frameFWText, &originalFrameData[selectedFrame].frameWidth, frameFWEdit);
+		DrawText("fH:", 290, static_cast<int>(r2 + 4), 14, th.accent);
+		GuiValueBoxFloat(Rectangle{.x = 315, .y = r2, .width = 65, .height = 20}, NULL, frameFHText, &originalFrameData[selectedFrame].frameHeight, frameFHEdit);
 
-			const float r3 = panelY + 90.0f;
-			DrawText(TextFormat("Cur: X:%.0f Y:%.0f W:%.0f H:%.0f", f.x, f.y, f.width, f.height), 10, static_cast<int>(r3), 14, BLACK);
+		const float r3 = panelY + 90.0f;
+		DrawText(TextFormat("Cur: X:%.0f Y:%.0f W:%.0f H:%.0f", f.x, f.y, f.width, f.height), 10, static_cast<int>(r3), 14, th.text);
 
 			if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
 				auto toggleEdit = [&](bool &target, float x, float y, float w, float h) {
@@ -903,6 +1072,417 @@ int main() {
 			if (!frameFYEdit) snprintf(frameFYText, sizeof(frameFYText), "%.1f", originalFrameData[selectedFrame].frameY);
 			if (!frameFWEdit) snprintf(frameFWText, sizeof(frameFWText), "%.1f", originalFrameData[selectedFrame].frameWidth);
 			if (!frameFHEdit) snprintf(frameFHText, sizeof(frameFHText), "%.1f", originalFrameData[selectedFrame].frameHeight);
+		}
+
+		} else if (appState == STATE_ANIM_EDITOR) {
+
+			DrawRectangle(0, 0, 1280, 720, th.bg);
+
+			DrawRectangle(0, 0, 1280, 40, th.headerBg);
+			if (GuiButton(Rectangle{10, 8, 100, 25}, "< BACK")) {
+				appState = STATE_MAIN;
+			}
+			DrawText("ANIMATION EDITOR", 400, 12, 18, th.textBright);
+			const char *zoomLabel = editorZoomed ? "NORMAL" : "ZOOM";
+			if (GuiButton(Rectangle{600, 8, 80, 25}, zoomLabel)) {
+				editorZoomed = !editorZoomed;
+			}
+			if (GuiButton(Rectangle{690, 8, 110, 25}, "CHANGE PNG")) {
+				std::string pngPath = openFileDlg("PNG Files (*.png)\0*.png\0");
+				if (!pngPath.empty()) {
+					currentPngPath = pngPath;
+					loadAtlas(spritesheet, imageDimensions, doc, frameRects, originalFrameRects, originalFrameData, frameNames, container, currentPngPath, hasXml);
+					scale = 1.0f;
+					editorSelectedFrame = frameRects.empty() ? -1 : 0;
+					editorScrollY = 0;
+					if (hasXml) detectAnimGroups(frameNames, animGroups);
+					animFrame = 0;
+					animPlaying = false;
+				}
+			}
+			const char *themeLabelEd = darkMode ? "LIGHT" : "DARK";
+			if (GuiButton(Rectangle{810, 8, 60, 25}, themeLabelEd)) {
+				darkMode = !darkMode;
+				applyGuiTheme();
+			}
+			const char *frameBoxLabel = editorShowFrameBox ? "HIDE BOX" : "SHOW BOX";
+			if (GuiButton(Rectangle{880, 8, 80, 25}, frameBoxLabel)) {
+				editorShowFrameBox = !editorShowFrameBox;
+			}
+			if (GuiButton(Rectangle{1150, 8, 120, 25}, "SAVE XML")) {
+				if (!currentPngPath.empty()) {
+					std::string xmlPath = currentPngPath;
+					xmlPath.replace(xmlPath.length() - 3, 3, "xml");
+					pugi::xml_document outDoc;
+					pugi::xml_node outAtlas = outDoc.append_child("TextureAtlas");
+					outAtlas.append_attribute("imagePath").set_value(currentPngPath.c_str());
+					outAtlas.append_attribute("width").set_value(static_cast<int>(imageDimensions.width));
+					outAtlas.append_attribute("height").set_value(static_cast<int>(imageDimensions.height));
+
+					for (size_t i = 0; i < frameRects.size(); ++i) {
+						pugi::xml_node sub = outAtlas.append_child("SubTexture");
+						sub.append_attribute("name").set_value(frameNames[i].c_str());
+						sub.append_attribute("x").set_value(frameRects[i].x);
+						sub.append_attribute("y").set_value(frameRects[i].y);
+						sub.append_attribute("width").set_value(frameRects[i].width);
+						sub.append_attribute("height").set_value(frameRects[i].height);
+
+						bool foundGroup = false;
+						for (size_t g = 1; g < animGroups.size(); ++g) {
+							const auto &grp = animGroups[g];
+							for (size_t k = 0; k < grp.frameIndices.size(); ++k) {
+								if (grp.frameIndices[k] == static_cast<int>(i)) {
+									GroupCanvasInfo ci = computeGroupCanvas(frameRects, originalFrameData, grp.frameIndices);
+									sub.append_attribute("frameX").set_value(ci.frameOffsets[k].first);
+									sub.append_attribute("frameY").set_value(ci.frameOffsets[k].second);
+									sub.append_attribute("frameWidth").set_value(ci.frameWidth);
+									sub.append_attribute("frameHeight").set_value(ci.frameHeight);
+									foundGroup = true;
+									break;
+								}
+							}
+							if (foundGroup) break;
+						}
+						if (!foundGroup && i < originalFrameData.size()) {
+							sub.append_attribute("frameX").set_value(originalFrameData[i].frameX);
+							sub.append_attribute("frameY").set_value(originalFrameData[i].frameY);
+							sub.append_attribute("frameWidth").set_value(originalFrameData[i].frameWidth);
+							sub.append_attribute("frameHeight").set_value(originalFrameData[i].frameHeight);
+						}
+					}
+					outDoc.save_file(xmlPath.c_str());
+					doc.reset();
+					doc.load_file(xmlPath.c_str());
+					hasXml = true;
+				}
+			}
+
+			const float leftW = editorZoomed ? 350.0f : 920.0f;
+			const float rightW = editorZoomed ? 910.0f : 340.0f;
+			const float topY = 45.0f;
+			const float botY = 670.0f;
+			const float midH = botY - topY;
+
+			DrawRectangle(0, static_cast<int>(topY), static_cast<int>(leftW), static_cast<int>(midH), th.panelBg);
+			DrawRectangle(static_cast<int>(leftW), static_cast<int>(topY), static_cast<int>(rightW), static_cast<int>(midH), th.panelBgAlt);
+			DrawLine(static_cast<int>(leftW), static_cast<int>(topY), static_cast<int>(leftW), static_cast<int>(botY), th.border);
+
+			if (IsKeyDown(KEY_LEFT_CONTROL)) {
+				editorScrollY -= GetMouseWheelMove() * 40.0f;
+			}
+
+			float curY = topY + 5.0f - editorScrollY;
+			for (size_t g = 0; g < animGroups.size() && curY < botY; ++g) {
+				const auto &grp = animGroups[g];
+				const int grpCount = static_cast<int>(grp.frameIndices.size());
+
+				if (curY + 25.0f > topY && curY < botY) {
+					bool exp = (static_cast<int>(g) == editorSelectedAnim);
+					const char *arrow = exp ? "v" : ">";
+					DrawText(TextFormat("%s %s (%d frames)", arrow, grp.name.c_str(), grpCount), static_cast<int>(leftW - leftW + 10), static_cast<int>(curY), 16, th.text);
+					if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), Rectangle{0, curY, leftW, 22})) {
+						editorSelectedAnim = static_cast<int>(g);
+						animPlaying = false;
+						animFrame = 0;
+					}
+					curY += 25.0f;
+				}
+
+				if (static_cast<int>(g) == editorSelectedAnim) {
+					float thumbX = 10.0f;
+					const float thumbSize = 60.0f;
+					const float thumbPad = 6.0f;
+					for (int f = 0; f < grpCount && curY < botY + 100.0f; ++f) {
+						const int fi = grp.frameIndices[f];
+						if (curY + thumbSize > topY && curY < botY && thumbX + thumbSize < leftW) {
+							const auto &src = frameRects[fi];
+							Rectangle thumbRect = {thumbX, curY, thumbSize, thumbSize};
+							bool isSelected = (fi == editorSelectedFrame);
+						DrawRectangleRec(thumbRect, isSelected ? th.selectedBg : th.panelBgAlt);
+						DrawRectangleLinesEx(thumbRect, isSelected ? 3 : 1, isSelected ? th.accent : th.border);
+
+							float fitS = std::min(thumbSize / src.width, thumbSize / src.height);
+							if (fitS > 1.0f) fitS = 1.0f;
+							float dW = src.width * fitS;
+							float dH = src.height * fitS;
+							Rectangle dst = {thumbX + (thumbSize - dW) / 2, curY + (thumbSize - dH) / 2, dW, dH};
+							DrawTexturePro(spritesheet, src, dst, Vector2Zero(), 0.0f, WHITE);
+
+							DrawText(TextFormat("%d", f), static_cast<int>(thumbX + 2), static_cast<int>(curY + 2), 10, th.textDim);
+
+							if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), thumbRect)) {
+								editorSelectedFrame = fi;
+								animFrame = f;
+							}
+
+							thumbX += thumbSize + thumbPad;
+						} else {
+							thumbX += thumbSize + thumbPad;
+						}
+						if (thumbX + thumbSize > leftW) {
+							thumbX = 10.0f;
+							curY += thumbSize + thumbPad;
+						}
+					}
+					curY += thumbSize + thumbPad + 10.0f;
+				}
+			}
+			if (editorScrollY < 0) editorScrollY = 0;
+
+			float rpX = leftW + 10.0f;
+			float rpY = topY + 5.0f;
+
+			int showFrame = editorSelectedFrame;
+			if (!animGroups.empty() && editorSelectedAnim >= 0 && editorSelectedAnim < static_cast<int>(animGroups.size())) {
+				const auto &grp = animGroups[editorSelectedAnim];
+				if (animFrame >= 0 && animFrame < static_cast<int>(grp.frameIndices.size())) {
+					showFrame = grp.frameIndices[animFrame];
+				}
+			}
+			if (showFrame < 0 || showFrame >= static_cast<int>(frameRects.size())) {
+				showFrame = editorSelectedFrame;
+			}
+
+			if (showFrame >= 0 && showFrame < static_cast<int>(frameNames.size())) {
+				const auto &f = frameRects[showFrame];
+
+				float prevW = rightW - 20.0f;
+				float prevH = editorZoomed ? 350.0f : 120.0f;
+				Rectangle prevBg = {rpX, rpY, prevW, prevH};
+				DrawRectangle(static_cast<int>(rpX), static_cast<int>(rpY), static_cast<int>(prevW), static_cast<int>(prevH), th.previewBg);
+
+				if (!animGroups.empty() && editorSelectedAnim >= 0 && editorSelectedAnim < static_cast<int>(animGroups.size())) {
+					const auto &grp = animGroups[editorSelectedAnim];
+					if (!grp.frameIndices.empty()) {
+						const int ghostIdx = grp.frameIndices[0];
+						if (ghostIdx != showFrame && ghostIdx >= 0 && ghostIdx < static_cast<int>(frameRects.size())) {
+							const auto &ghost = frameRects[ghostIdx];
+							float gs = std::min(prevW / ghost.width, prevH / ghost.height) * editorPreviewZoom;
+							float gw = ghost.width * gs;
+							float gh = ghost.height * gs;
+							Rectangle gd = {rpX + (prevW - gw) / 2, rpY + (prevH - gh) / 2, gw, gh};
+							DrawTexturePro(spritesheet, ghost, gd, Vector2Zero(), 0.0f, ColorAlpha(RED, 0.25f));
+						}
+					}
+				}
+
+				float fitS = std::min(prevW / f.width, prevH / f.height) * editorPreviewZoom;
+				float dW = f.width * fitS;
+				float dH = f.height * fitS;
+				Rectangle prevDst = {rpX + (prevW - dW) / 2, rpY + (prevH - dH) / 2, dW, dH};
+				DrawTexturePro(spritesheet, f, prevDst, Vector2Zero(), 0.0f, WHITE);
+				DrawRectangleLinesEx(prevBg, 1, th.border);
+				if (editorShowFrameBox) {
+					DrawRectangleLinesEx(prevDst, 2, th.accent);
+				}
+				DrawText(frameNames[showFrame].c_str(), static_cast<int>(rpX + 5), static_cast<int>(rpY + prevH + 3), 12, th.text);
+				DrawText(TextFormat("Y/E zoom: %.0f%%", editorPreviewZoom * 100), static_cast<int>(rpX + prevW - 110), static_cast<int>(rpY + prevH + 3), 11, th.textDim);
+				rpY += prevH + 20.0f;
+
+				if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), prevBg)) {
+					editorDragging = true;
+					editorDragStart = GetMousePosition();
+				}
+
+				if (editorSelectedFrame != showFrame) {
+					editorSelectedFrame = showFrame;
+					snprintf(frameNameText, sizeof(frameNameText), "%s", frameNames[showFrame].c_str());
+				}
+
+				float lblX = rpX;
+				float inX = rpX + 35.0f;
+				float inW = std::min(120.0f, (rightW - 90.0f) / 2.0f);
+				float rowH = 30.0f;
+
+				float origRpY = rpY;
+
+				DrawText("Name:", static_cast<int>(lblX), static_cast<int>(rpY + 4), 14, th.text);
+				GuiTextBox(Rectangle{inX, rpY, 200, 26}, frameNameText, sizeof(frameNameText), frameNameEdit);
+				if (frameNameEdit) frameNames[showFrame] = frameNameText;
+				rpY += rowH;
+
+			DrawText("X:", static_cast<int>(lblX), static_cast<int>(rpY + 4), 14, th.text);
+			GuiValueBoxFloat(Rectangle{inX, rpY, inW, 26}, NULL, frameXText, &frameRects[showFrame].x, frameXEdit);
+			DrawText("Y:", static_cast<int>(inX + inW + 10), static_cast<int>(rpY + 4), 14, th.text);
+				GuiValueBoxFloat(Rectangle{inX + inW + 25, rpY, inW, 26}, NULL, frameYText, &frameRects[showFrame].y, frameYEdit);
+				rpY += rowH;
+
+			DrawText("W:", static_cast<int>(lblX), static_cast<int>(rpY + 4), 14, th.text);
+			GuiValueBoxFloat(Rectangle{inX, rpY, inW, 26}, NULL, frameWText, &frameRects[showFrame].width, frameWEdit);
+			DrawText("H:", static_cast<int>(inX + inW + 10), static_cast<int>(rpY + 4), 14, th.text);
+				GuiValueBoxFloat(Rectangle{inX + inW + 25, rpY, inW, 26}, NULL, frameHText, &frameRects[showFrame].height, frameHEdit);
+				rpY += rowH;
+
+			DrawText("fX:", static_cast<int>(lblX), static_cast<int>(rpY + 4), 14, th.accent);
+			GuiValueBoxFloat(Rectangle{inX, rpY, inW, 26}, NULL, frameFXText, &originalFrameData[showFrame].frameX, frameFXEdit);
+			DrawText("fY:", static_cast<int>(inX + inW + 10), static_cast<int>(rpY + 4), 14, th.accent);
+				GuiValueBoxFloat(Rectangle{inX + inW + 25, rpY, inW, 26}, NULL, frameFYText, &originalFrameData[showFrame].frameY, frameFYEdit);
+				rpY += rowH;
+
+			DrawText("fW:", static_cast<int>(lblX), static_cast<int>(rpY + 4), 14, th.accent);
+			GuiValueBoxFloat(Rectangle{inX, rpY, inW, 26}, NULL, frameFWText, &originalFrameData[showFrame].frameWidth, frameFWEdit);
+			DrawText("fH:", static_cast<int>(inX + inW + 10), static_cast<int>(rpY + 4), 14, th.accent);
+				GuiValueBoxFloat(Rectangle{inX + inW + 25, rpY, inW, 26}, NULL, frameFHText, &originalFrameData[showFrame].frameHeight, frameFHEdit);
+				rpY += rowH;
+
+				DrawText(TextFormat("Cur: X:%.0f Y:%.0f W:%.0f H:%.0f", f.x, f.y, f.width, f.height), static_cast<int>(lblX), static_cast<int>(rpY + 2), 11, th.text);
+				rpY += rowH;
+
+				if (!frameXEdit) snprintf(frameXText, sizeof(frameXText), "%.1f", frameRects[showFrame].x);
+				if (!frameYEdit) snprintf(frameYText, sizeof(frameYText), "%.1f", frameRects[showFrame].y);
+				if (!frameWEdit) snprintf(frameWText, sizeof(frameWText), "%.1f", frameRects[showFrame].width);
+				if (!frameHEdit) snprintf(frameHText, sizeof(frameHText), "%.1f", frameRects[showFrame].height);
+				if (!frameFXEdit) snprintf(frameFXText, sizeof(frameFXText), "%.1f", originalFrameData[showFrame].frameX);
+				if (!frameFYEdit) snprintf(frameFYText, sizeof(frameFYText), "%.1f", originalFrameData[showFrame].frameY);
+				if (!frameFWEdit) snprintf(frameFWText, sizeof(frameFWText), "%.1f", originalFrameData[showFrame].frameWidth);
+				if (!frameFHEdit) snprintf(frameFHText, sizeof(frameFHText), "%.1f", originalFrameData[showFrame].frameHeight);
+
+				if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+					int clickedField = -1;
+					auto hitTest = [&](float bx, float by, float bw, float bh) {
+						if (clickedField < 0 && CheckCollisionPointRec(GetMousePosition(), Rectangle{bx, by, bw, bh})) {
+							clickedField = 0;
+						}
+					};
+
+					hitTest(inX, origRpY, 200, 26);
+					if (clickedField == 0) clickedField = 1;
+					else {
+						hitTest(inX, origRpY + rowH, inW, 26);
+						if (clickedField == 0) clickedField = 2;
+						else {
+							hitTest(inX + inW + 25, origRpY + rowH, inW, 26);
+							if (clickedField == 0) clickedField = 3;
+							else {
+								hitTest(inX, origRpY + rowH * 2, inW, 26);
+								if (clickedField == 0) clickedField = 4;
+								else {
+									hitTest(inX + inW + 25, origRpY + rowH * 2, inW, 26);
+									if (clickedField == 0) clickedField = 5;
+									else {
+										hitTest(inX, origRpY + rowH * 3, inW, 26);
+										if (clickedField == 0) clickedField = 6;
+										else {
+											hitTest(inX + inW + 25, origRpY + rowH * 3, inW, 26);
+											if (clickedField == 0) clickedField = 7;
+											else {
+												hitTest(inX, origRpY + rowH * 4, inW, 26);
+												if (clickedField == 0) clickedField = 8;
+												else {
+													hitTest(inX + inW + 25, origRpY + rowH * 4, inW, 26);
+													if (clickedField == 0) clickedField = 9;
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+
+					if (clickedField > 0) {
+						frameNameEdit = (clickedField == 1);
+						frameXEdit = (clickedField == 2);
+						frameYEdit = (clickedField == 3);
+						frameWEdit = (clickedField == 4);
+						frameHEdit = (clickedField == 5);
+						frameFXEdit = (clickedField == 6);
+						frameFYEdit = (clickedField == 7);
+						frameFWEdit = (clickedField == 8);
+						frameFHEdit = (clickedField == 9);
+					} else {
+						frameNameEdit = false;
+						frameXEdit = false;
+						frameYEdit = false;
+						frameWEdit = false;
+						frameHEdit = false;
+						frameFXEdit = false;
+						frameFYEdit = false;
+						frameFWEdit = false;
+						frameFHEdit = false;
+					}
+				}
+			} else {
+				DrawText("Select a frame to edit", static_cast<int>(rpX), static_cast<int>(rpY + 50), 16, th.textDim);
+			}
+
+			const float botBarY = 670.0f;
+			if (!animGroups.empty() && editorSelectedAnim >= 0 && editorSelectedAnim < static_cast<int>(animGroups.size())) {
+				const auto &grp = animGroups[editorSelectedAnim];
+				const int gc = static_cast<int>(grp.frameIndices.size());
+
+				if (animPlaying && gc > 0) {
+					animTimer += GetFrameTime();
+					float interval = 1.0f / animSpeed;
+					if (interval > 0 && animTimer >= interval) {
+						animTimer -= interval;
+						animFrame = (animFrame + 1) % gc;
+					}
+				}
+
+				if (GuiButton(Rectangle{10, botBarY, 50, 26}, "|<")) {
+					animFrame = (animFrame - 1 + gc) % gc; animPlaying = false; animTimer = 0;
+				}
+				if (GuiButton(Rectangle{65, botBarY, 50, 26}, animPlaying ? "||" : ">")) {
+					animPlaying = !animPlaying; animTimer = 0;
+				}
+				if (GuiButton(Rectangle{120, botBarY, 50, 26}, ">|")) {
+					animFrame = (animFrame + 1) % gc; animPlaying = false; animTimer = 0;
+				}
+			DrawText(TextFormat("[%s] %d / %d", grp.name.c_str(), animFrame + 1, gc), 180, static_cast<int>(botBarY + 5), 16, th.text);
+
+			DrawText("FPS:", 430, static_cast<int>(botBarY + 5), 14, th.text);
+			GuiSlider(Rectangle{470, botBarY, 240, 22}, "1", "30", &animSpeed, 1.0f, 30.0f);
+			DrawText(TextFormat("%.1f", animSpeed), 720, static_cast<int>(botBarY + 5), 14, th.textDim);
+
+			if (GuiButton(Rectangle{770, botBarY, 110, 26}, "RESET GROUP")) {
+				if (editorSelectedAnim >= 0 && editorSelectedAnim < static_cast<int>(animGroups.size())) {
+					for (int fi : animGroups[editorSelectedAnim].frameIndices) {
+						if (fi >= 0 && fi < static_cast<int>(frameRects.size()) && fi < static_cast<int>(originalFrameRects.size())) {
+							frameRects[fi] = originalFrameRects[fi];
+						}
+					}
+				}
+			}
+			if (GuiButton(Rectangle{890, botBarY, 90, 26}, "RESET ALL")) {
+				for (size_t i = 0; i < frameRects.size() && i < originalFrameRects.size(); ++i) {
+					frameRects[i] = originalFrameRects[i];
+				}
+			}
+			}
+
+			if (IsKeyPressed(KEY_Y)) editorPreviewZoom = std::max(0.1f, editorPreviewZoom - 0.1f);
+			if (IsKeyPressed(KEY_E)) editorPreviewZoom = std::min(5.0f, editorPreviewZoom + 0.1f);
+
+			bool anyTextEdit = frameNameEdit || frameXEdit || frameYEdit || frameWEdit || frameHEdit || frameFXEdit || frameFYEdit || frameFWEdit || frameFHEdit;
+			if (!anyTextEdit && editorSelectedFrame >= 0 && editorSelectedFrame < static_cast<int>(frameRects.size())) {
+				float spd = IsKeyDown(KEY_LEFT_SHIFT) ? 10.0f : 1.0f;
+				if (IsKeyPressed(KEY_LEFT)) frameRects[editorSelectedFrame].x += spd;
+				if (IsKeyPressed(KEY_RIGHT)) frameRects[editorSelectedFrame].x -= spd;
+				if (IsKeyPressed(KEY_UP)) frameRects[editorSelectedFrame].y += spd;
+				if (IsKeyPressed(KEY_DOWN)) frameRects[editorSelectedFrame].y -= spd;
+			}
+
+			if (IsKeyPressed(KEY_ESCAPE)) {
+				appState = STATE_MAIN;
+			}
+
+			if (editorDragging) {
+				if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+					Vector2 mouseImg = GetMousePosition();
+					float dx = mouseImg.x - editorDragStart.x;
+					float dy = mouseImg.y - editorDragStart.y;
+					if (editorSelectedFrame >= 0 && editorSelectedFrame < static_cast<int>(frameRects.size())) {
+						frameRects[editorSelectedFrame].x -= dx;
+						frameRects[editorSelectedFrame].y -= dy;
+					}
+					editorDragStart = mouseImg;
+					DrawText("Dragging frame... release to drop", 10, 700, 14, th.accent);
+				} else {
+					editorDragging = false;
+				}
+			}
+
 		}
 
 		EndDrawing();
